@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "错题复习提醒",
+    "slug": "wrong-problem-review",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#F5F8F4"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "package": "com.aok.wrongproblemreview",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#F5F8F4"
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "5234afba-7ff5-4364-a22c-8c77ab5bdd9d"
+      }
+    },
+    "owner": "keil_jordan"
+  }
+}

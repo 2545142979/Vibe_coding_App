@@ -1,0 +1,9 @@
+node_modules
+.expo
+.eas
+dist
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.keystore
+*.jks
