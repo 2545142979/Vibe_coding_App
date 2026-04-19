@@ -85,7 +85,10 @@ const getReviewPlan = (reviewPlanKey) => REVIEW_PLANS[reviewPlanKey] || REVIEW_P
 
 const normalizeProblem = (problem) => {
   const reviewPlanKey = REVIEW_PLANS[problem?.reviewPlanKey] ? problem.reviewPlanKey : 'medium';
-  const stageIndex = Number.isInteger(problem?.stageIndex) ? Math.max(problem.stageIndex, 0) : 0;
+  const reviewPlan = getReviewPlan(reviewPlanKey);
+  const rawStageIndex = Number.isInteger(problem?.stageIndex) ? problem.stageIndex : 0;
+  const maxStageIndex = problem?.nextReviewDate ? reviewPlan.steps.length - 1 : reviewPlan.steps.length;
+  const stageIndex = clamp(rawStageIndex, 0, Math.max(maxStageIndex, 0));
 
   return {
     id: problem?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -214,7 +217,7 @@ function SwipeableRow({ children, onDelete }) {
   );
 }
 
-function ProblemCard({ problem, todayKey, onDone, showDoneButton = false }) {
+function ProblemCard({ problem, todayKey, onDone, showDoneButton = false, doneDisabled = false }) {
   const reviewPlan = getReviewPlan(problem.reviewPlanKey);
 
   return (
@@ -241,7 +244,11 @@ function ProblemCard({ problem, todayKey, onDone, showDoneButton = false }) {
       </View>
 
       {showDoneButton ? (
-        <Pressable onPress={() => onDone(problem.id)} style={styles.doneButton}>
+        <Pressable
+          onPress={() => onDone(problem.id)}
+          style={[styles.doneButton, doneDisabled && styles.doneButtonDisabled]}
+          disabled={doneDisabled}
+        >
           <Text style={styles.doneButtonText}>Done</Text>
         </Pressable>
       ) : null}
@@ -258,10 +265,31 @@ export default function App() {
   const [problemInfo, setProblemInfo] = useState('');
   const [knowledgePoint, setKnowledgePoint] = useState('');
   const [reviewPlanKey, setReviewPlanKey] = useState('medium');
+  const [todayKey, setTodayKey] = useState(() => toDateKey());
+  const [isPersisting, setIsPersisting] = useState(false);
+  const [pendingDoneIds, setPendingDoneIds] = useState([]);
   const [saving, setSaving] = useState(false);
+  const problemsRef = useRef([]);
+  const persistQueueRef = useRef(Promise.resolve());
+  const pendingPersistCountRef = useRef(0);
+  const pendingDoneIdsRef = useRef(new Set());
 
-  const todayKey = toDateKey();
   const topInset = Platform.OS === 'android' ? (NativeStatusBar.currentHeight || 0) + 10 : 14;
+
+  useEffect(() => {
+    problemsRef.current = problems;
+  }, [problems]);
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setTodayKey((currentTodayKey) => {
+        const nextTodayKey = toDateKey();
+        return currentTodayKey === nextTodayKey ? currentTodayKey : nextTodayKey;
+      });
+    }, 60 * 1000);
+
+    return () => clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     const loadProblems = async () => {
@@ -269,12 +297,25 @@ export default function App() {
         const storedValue = await AsyncStorage.getItem(STORAGE_KEY);
 
         if (storedValue) {
-          const parsedValue = JSON.parse(storedValue);
+          let parsedValue;
+
+          try {
+            parsedValue = JSON.parse(storedValue);
+          } catch (parseError) {
+            await AsyncStorage.removeItem(STORAGE_KEY);
+            problemsRef.current = [];
+            setProblems([]);
+            Alert.alert('本地数据已损坏', '已清空无法读取的本地数据，你可以继续使用 App。');
+            return;
+          }
+
           const normalizedProblems = Array.isArray(parsedValue)
             ? parsedValue.map((problem) => normalizeProblem(problem))
             : [];
 
-          setProblems(sortProblems(normalizedProblems));
+          const sortedProblems = sortProblems(normalizedProblems);
+          problemsRef.current = sortedProblems;
+          setProblems(sortedProblems);
         }
       } catch (error) {
         Alert.alert('读取失败', '本地数据读取失败，请重新打开 App 再试一次。');
@@ -286,11 +327,32 @@ export default function App() {
     loadProblems();
   }, []);
 
-  const persistProblems = async (nextProblems) => {
-    const normalizedProblems = nextProblems.map((problem) => normalizeProblem(problem));
-    const sortedProblems = sortProblems(normalizedProblems);
-    setProblems(sortedProblems);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(sortedProblems));
+  const persistProblems = async (updater) => {
+    pendingPersistCountRef.current += 1;
+    setIsPersisting(true);
+
+    const persistTask = persistQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const currentProblems = problemsRef.current;
+        const nextProblemList = typeof updater === 'function' ? updater(currentProblems) : updater;
+        const normalizedProblems = nextProblemList.map((problem) => normalizeProblem(problem));
+        const sortedProblems = sortProblems(normalizedProblems);
+
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(sortedProblems));
+
+        problemsRef.current = sortedProblems;
+        setProblems(sortedProblems);
+
+        return sortedProblems;
+      });
+
+    persistQueueRef.current = persistTask.finally(() => {
+      pendingPersistCountRef.current = Math.max(0, pendingPersistCountRef.current - 1);
+      setIsPersisting(pendingPersistCountRef.current > 0);
+    });
+
+    return persistTask;
   };
 
   const todayProblems = useMemo(() => {
@@ -346,7 +408,7 @@ export default function App() {
 
     try {
       const createdAt = todayKey;
-      const nextProblems = [
+      await persistProblems((currentProblems) => [
         {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           bookName: trimmedBookName,
@@ -359,10 +421,8 @@ export default function App() {
           reviewHistory: [],
           completedAt: null,
         },
-        ...problems,
-      ];
-
-      await persistProblems(nextProblems);
+        ...currentProblems,
+      ]);
       closeModal();
     } catch (error) {
       Alert.alert('保存失败', '本地保存失败，请稍后再试。');
@@ -372,37 +432,47 @@ export default function App() {
   };
 
   const handleDone = async (problemId) => {
+    if (pendingDoneIdsRef.current.has(problemId)) {
+      return;
+    }
+
+    pendingDoneIdsRef.current.add(problemId);
+    setPendingDoneIds((currentIds) => [...currentIds, problemId]);
+
     try {
-      const nextProblems = problems.map((problem) => {
-        if (problem.id !== problemId) {
-          return problem;
-        }
+      await persistProblems((currentProblems) =>
+        currentProblems.map((problem) => {
+          if (problem.id !== problemId) {
+            return problem;
+          }
 
-        const reviewPlan = getReviewPlan(problem.reviewPlanKey);
-        const nextStageIndex = problem.stageIndex + 1;
-        const reviewHistory = [...(problem.reviewHistory || []), todayKey];
+          const reviewPlan = getReviewPlan(problem.reviewPlanKey);
+          const nextStageIndex = problem.stageIndex + 1;
+          const reviewHistory = [...(problem.reviewHistory || []), todayKey];
 
-        if (nextStageIndex >= reviewPlan.steps.length) {
+          if (nextStageIndex >= reviewPlan.steps.length) {
+            return {
+              ...problem,
+              stageIndex: nextStageIndex,
+              nextReviewDate: null,
+              reviewHistory,
+              completedAt: todayKey,
+            };
+          }
+
           return {
             ...problem,
             stageIndex: nextStageIndex,
-            nextReviewDate: null,
+            nextReviewDate: addDays(todayKey, reviewPlan.steps[nextStageIndex]),
             reviewHistory,
-            completedAt: todayKey,
           };
-        }
-
-        return {
-          ...problem,
-          stageIndex: nextStageIndex,
-          nextReviewDate: addDays(todayKey, reviewPlan.steps[nextStageIndex]),
-          reviewHistory,
-        };
-      });
-
-      await persistProblems(nextProblems);
+        })
+      );
     } catch (error) {
       Alert.alert('更新失败', '复习状态没有保存成功，请再点一次。');
+    } finally {
+      pendingDoneIdsRef.current.delete(problemId);
+      setPendingDoneIds((currentIds) => currentIds.filter((currentId) => currentId !== problemId));
     }
   };
 
@@ -417,8 +487,7 @@ export default function App() {
         style: 'destructive',
         onPress: async () => {
           try {
-            const nextProblems = problems.filter((problem) => problem.id !== problemId);
-            await persistProblems(nextProblems);
+            await persistProblems((currentProblems) => currentProblems.filter((problem) => problem.id !== problemId));
           } catch (error) {
             Alert.alert('删除失败', '这道题暂时没有删掉，请再试一次。');
           }
@@ -443,7 +512,7 @@ export default function App() {
             </View>
           </View>
 
-          <Pressable onPress={() => setModalVisible(true)} style={styles.headerAddButton}>
+          <Pressable onPress={() => setModalVisible(true)} style={styles.headerAddButton} disabled={isPersisting}>
             <Text style={styles.headerAddButtonText}>+ 新增</Text>
           </Pressable>
         </View>
@@ -489,7 +558,15 @@ export default function App() {
             keyExtractor={(item) => item.id}
             contentContainerStyle={[styles.listContent, todayProblems.length === 0 && styles.emptyListContent]}
             showsVerticalScrollIndicator={false}
-            renderItem={({ item }) => <ProblemCard problem={item} todayKey={todayKey} onDone={handleDone} showDoneButton />}
+            renderItem={({ item }) => (
+              <ProblemCard
+                problem={item}
+                todayKey={todayKey}
+                onDone={handleDone}
+                showDoneButton
+                doneDisabled={isPersisting || pendingDoneIds.includes(item.id)}
+              />
+            )}
             ListEmptyComponent={
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>今天没有待复习题目</Text>
@@ -616,7 +693,11 @@ export default function App() {
 
                 <Text style={styles.helperText}>保存后会自动记录今天为录入日，并按你选择的程度安排下一次复习。</Text>
 
-                <Pressable onPress={handleSave} style={[styles.saveButton, saving && styles.saveButtonDisabled]} disabled={saving}>
+                <Pressable
+                  onPress={handleSave}
+                  style={[styles.saveButton, (saving || isPersisting) && styles.saveButtonDisabled]}
+                  disabled={saving || isPersisting}
+                >
                   <Text style={styles.saveButtonText}>{saving ? '保存中...' : '保存这道错题'}</Text>
                 </Pressable>
               </ScrollView>
@@ -900,6 +981,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderRadius: 16,
+  },
+  doneButtonDisabled: {
+    opacity: 0.5,
   },
   doneButtonText: {
     fontSize: 15,
